@@ -144,8 +144,12 @@ void sendAudioToDVMBridge(const std::vector<int16_t>& samples, const std::string
 std::vector<int16_t> generateTTSAudio(const std::string& text, const Config& config) {
     std::vector<int16_t> samples;
     
-    // Add lead silence
+    // Add lead silence (aligned to LDU boundary)
+    // P25 needs 9 IMBE frames per LDU, each from 160 samples = 1440 samples per LDU
+    const int LDU_SAMPLES = 9 * 160;  // 1440 samples per LDU
     int leadSamples = static_cast<int>(SAMPLE_RATE * config.leadSilence);
+    // Round up to next LDU boundary
+    leadSamples = ((leadSamples + LDU_SAMPLES - 1) / LDU_SAMPLES) * LDU_SAMPLES;
     samples.resize(leadSamples, 0);
     
     std::string cmd;
@@ -187,9 +191,17 @@ std::vector<int16_t> generateTTSAudio(const std::string& text, const Config& con
     int trailSamples = static_cast<int>(SAMPLE_RATE * config.trailSilence);
     samples.resize(samples.size() + trailSamples, 0);
     
+    // Pad to LDU boundary (P25 needs 9 IMBE frames per LDU, each from 160 samples)
+    // So total samples should be multiple of 1440 (9 * 160)
+    int remainder = samples.size() % LDU_SAMPLES;
+    if (remainder != 0) {
+        int padSamples = LDU_SAMPLES - remainder;
+        samples.resize(samples.size() + padSamples, 0);
+    }
+    
     std::cout << "Generated " << samples.size() << " samples ("
               << leadSamples << " lead silence + audio + "
-              << trailSamples << " trail silence)" << std::endl;
+              << trailSamples << " trail silence + LDU padding)" << std::endl;
     return samples;
 }
 
