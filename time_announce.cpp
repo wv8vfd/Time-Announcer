@@ -164,11 +164,13 @@ std::vector<int16_t> generateTTSAudio(const std::string& text, const Config& con
     std::string cmd;
     
     if (config.engine == "piper") {
-        // Use piper (neural TTS) - use temp file since raw pipe is unreliable
+        // Use piper (neural TTS) - write to temp files to avoid pipe issues
+        // Redirect piper stdout/stderr since it logs to stdout
         char piperCmd[512];
         snprintf(piperCmd, sizeof(piperCmd),
-                 "echo \"%s\" | %s --model %s --output_file /tmp/piper_out.wav 2>/dev/null && "
-                 "sox /tmp/piper_out.wav -r 8000 -b 16 -c 1 -t raw -",
+                 "echo \"%s\" | %s --model %s --output_file /tmp/piper_out.wav >/dev/null 2>&1 && "
+                 "sox /tmp/piper_out.wav -r 8000 -b 16 -c 1 -t raw /tmp/piper_out.raw && "
+                 "cat /tmp/piper_out.raw",
                  text.c_str(),
                  config.piperPath.c_str(),
                  config.piperModel.c_str());
