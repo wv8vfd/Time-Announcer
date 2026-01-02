@@ -1,0 +1,52 @@
+# Time Announce Configuration
+
+# DVMBridge connection
+network:
+  host: "127.0.0.1"
+  port: 32001
+
+# Audio settings
+audio:
+  # Seconds of silence before announcement (for radio RX path setup)
+  leadSilence: 5.0
+  # Seconds of silence after announcement
+  trailSilence: 1.0
+
+# Text-to-speech settings
+tts:
+  # Engine: "espeak", "pico", or "piper"
+  engine: "piper"
+  
+  # espeak settings (only used if engine is "espeak")
+  espeak:
+    # Voice (run 'espeak-ng --voices' to see all)
+    # Examples: en-us, en-gb, en-au, en-sc
+    # Add +m1, +m2, +f1, +f2 for male/female variants
+    voice: "en-us+m3"
+    # Pitch (0-99, default 50)
+    pitch: 40
+    # Speed in words per minute (default 175)
+    speed: 140
+    # Amplitude (0-200, default 100)
+    amplitude: 100
+
+  # pico settings (only used if engine is "pico")
+  pico:
+    # Language: en-US, en-GB, de-DE, es-ES, fr-FR, it-IT
+    language: "en-US"
+
+  # piper settings (only used if engine is "piper")
+  piper:
+    # Path to piper executable
+    path: "/opt/piper/piper"
+    # Path to voice model (.onnx file)
+    model: "/opt/piper/en_US-lessac-medium.onnx"
+
+# Announcement format
+announcement:
+  # Prefix before time (e.g., "West Comm, time is")
+  prefix: "West Comm, time is"
+  # Use 12-hour format (true) or 24-hour format (false)
+  use12Hour: true
+  # Include AM/PM (only if use12Hour is true)
+  includeAMPM: true
