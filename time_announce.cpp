@@ -159,10 +159,10 @@ std::vector<int16_t> generateTTSAudio(const std::string& text, const Config& con
         cmd = "pico2wave -l " + config.picoLanguage + " -w /tmp/tts_temp.wav \"" + text + "\" && "
               "sox /tmp/tts_temp.wav -r 8000 -b 16 -c 1 -t raw -";
     } else {
-        // Use espeak (default)
+        // Use espeak-ng (default)
         char espeakCmd[512];
         snprintf(espeakCmd, sizeof(espeakCmd),
-                 "espeak -v %s -p %d -s %d -a %d \"%s\" --stdout | "
+                 "espeak-ng -v %s -p %d -s %d -a %d \"%s\" --stdout | "
                  "sox -t wav - -r 8000 -b 16 -c 1 -t raw -",
                  config.espeakVoice.c_str(),
                  config.espeakPitch,
