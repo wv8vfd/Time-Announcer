@@ -46,6 +46,7 @@ struct Config {
     std::string prefix = "West Comm, time is";
     bool use12Hour = true;
     bool includeAMPM = true;
+    std::string preAnnounceFile = "";  // Optional sound file to play before announcement
     
     void load(const std::string& filename) {
         try {
@@ -85,6 +86,7 @@ struct Config {
                 prefix = config["announcement"]["prefix"].as<std::string>(prefix);
                 use12Hour = config["announcement"]["use12Hour"].as<bool>(use12Hour);
                 includeAMPM = config["announcement"]["includeAMPM"].as<bool>(includeAMPM);
+                preAnnounceFile = config["announcement"]["preAnnounceFile"].as<std::string>(preAnnounceFile);
             }
             
             std::cout << "Config loaded from " << filename << std::endl;
@@ -150,6 +152,35 @@ void sendAudioToDVMBridge(const std::vector<int16_t>& samples, const std::string
     std::cout << "Done sending audio" << std::endl;
 }
 
+std::vector<int16_t> loadPreAnnounceAudio(const std::string& filename) {
+    std::vector<int16_t> samples;
+    
+    if (filename.empty()) {
+        return samples;
+    }
+    
+    // Use sox to convert to raw 8kHz 16-bit mono (in case it isn't already)
+    std::string cmd = "sox \"" + filename + "\" -r 8000 -b 16 -c 1 -t raw /tmp/preannounce.raw 2>/dev/null && cat /tmp/preannounce.raw";
+    
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        std::cerr << "Failed to load pre-announce file: " << filename << std::endl;
+        return samples;
+    }
+    
+    int16_t sample;
+    while (fread(&sample, sizeof(int16_t), 1, pipe) == 1) {
+        samples.push_back(sample);
+    }
+    
+    pclose(pipe);
+    
+    std::cout << "Loaded pre-announce audio: " << samples.size() << " samples (" 
+              << (float)samples.size() / SAMPLE_RATE << " seconds)" << std::endl;
+    
+    return samples;
+}
+
 std::vector<int16_t> generateTTSAudio(const std::string& text, const Config& config) {
     std::vector<int16_t> samples;
     
@@ -160,6 +191,12 @@ std::vector<int16_t> generateTTSAudio(const std::string& text, const Config& con
     // Round up to next LDU boundary
     leadSamples = ((leadSamples + LDU_SAMPLES - 1) / LDU_SAMPLES) * LDU_SAMPLES;
     samples.resize(leadSamples, 0);
+    
+    // Add pre-announce audio if configured
+    if (!config.preAnnounceFile.empty()) {
+        std::vector<int16_t> preAnnounce = loadPreAnnounceAudio(config.preAnnounceFile);
+        samples.insert(samples.end(), preAnnounce.begin(), preAnnounce.end());
+    }
     
     std::string cmd;
     

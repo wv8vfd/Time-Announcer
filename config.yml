@@ -50,3 +50,6 @@ announcement:
   use12Hour: true
   # Include AM/PM (only if use12Hour is true)
   includeAMPM: true
+  # Optional sound file to play before announcement (leave empty for none)
+  # Should be a wav file - will be converted to 8kHz if needed
+  preAnnounceFile: "/opt/dvm/preannounce.wav"
