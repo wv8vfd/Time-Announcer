@@ -1,9 +1,11 @@
 #include <iostream>
 #include <fstream>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <time.h>
 #include <vector>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -25,6 +27,7 @@ struct Config {
     // Audio
     float leadSilence = 5.0f;
     float trailSilence = 1.0f;
+    float settleTime = 2.0f;  // Seconds to wait after TTS before sending
     
     // TTS
     std::string engine = "espeak";
@@ -60,6 +63,7 @@ struct Config {
             if (config["audio"]) {
                 leadSilence = config["audio"]["leadSilence"].as<float>(leadSilence);
                 trailSilence = config["audio"]["trailSilence"].as<float>(trailSilence);
+                settleTime = config["audio"]["settleTime"].as<float>(settleTime);
             }
             
             if (config["tts"]) {
@@ -113,10 +117,15 @@ void sendAudioToDVMBridge(const std::vector<int16_t>& samples, const std::string
     const uint8_t* data = reinterpret_cast<const uint8_t*>(samples.data());
     size_t totalBytes = samples.size() * sizeof(int16_t);
     size_t offset = 0;
+    int frameCount = 0;
 
     std::cout << "Sending " << totalBytes << " bytes (" 
               << (totalBytes / FRAME_SIZE) << " frames) to " 
               << host << ":" << port << std::endl;
+
+    // Get start time for precise pacing
+    struct timespec startTime, currentTime;
+    clock_gettime(CLOCK_MONOTONIC, &startTime);
 
     while (offset < totalBytes) {
         size_t chunkSize = std::min((size_t)FRAME_SIZE, totalBytes - offset);
@@ -143,9 +152,22 @@ void sendAudioToDVMBridge(const std::vector<int16_t>& samples, const std::string
         }
 
         offset += FRAME_SIZE;
+        frameCount++;
         
-        // 20ms frame pacing
-        usleep(20000);
+        // Calculate when the next frame should be sent
+        // 20ms = real-time, increase if DVMBridge has issues (try 21-22ms)
+        long targetUsec = frameCount * 20000L;
+        
+        // Get current elapsed time
+        clock_gettime(CLOCK_MONOTONIC, &currentTime);
+        long elapsedUsec = (currentTime.tv_sec - startTime.tv_sec) * 1000000L +
+                          (currentTime.tv_nsec - startTime.tv_nsec) / 1000L;
+        
+        // Sleep for the remaining time until next frame
+        long sleepUsec = targetUsec - elapsedUsec;
+        if (sleepUsec > 0) {
+            usleep(sleepUsec);
+        }
     }
 
     close(sock);
@@ -160,20 +182,35 @@ std::vector<int16_t> loadPreAnnounceAudio(const std::string& filename) {
     }
     
     // Use sox to convert to raw 8kHz 16-bit mono (in case it isn't already)
-    std::string cmd = "sox \"" + filename + "\" -r 8000 -b 16 -c 1 -t raw /tmp/preannounce.raw 2>/dev/null && cat /tmp/preannounce.raw";
+    // Use PID in temp filename to avoid collisions
+    int pid = getpid();
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "sox \"%s\" -r 8000 -b 16 -c 1 -t raw /tmp/preannounce_%d.raw 2>/dev/null && sync",
+             filename.c_str(), pid);
     
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        std::cerr << "Failed to load pre-announce file: " << filename << std::endl;
+    int ret = system(cmd);
+    if (ret != 0) {
+        std::cerr << "Failed to convert pre-announce file: " << filename << std::endl;
+        return samples;
+    }
+    
+    // Read the raw file directly
+    char rawPath[64];
+    snprintf(rawPath, sizeof(rawPath), "/tmp/preannounce_%d.raw", pid);
+    
+    FILE* rawFile = fopen(rawPath, "rb");
+    if (!rawFile) {
+        std::cerr << "Failed to open " << rawPath << std::endl;
         return samples;
     }
     
     int16_t sample;
-    while (fread(&sample, sizeof(int16_t), 1, pipe) == 1) {
+    while (fread(&sample, sizeof(int16_t), 1, rawFile) == 1) {
         samples.push_back(sample);
     }
     
-    pclose(pipe);
+    fclose(rawFile);
     
     std::cout << "Loaded pre-announce audio: " << samples.size() << " samples (" 
               << (float)samples.size() / SAMPLE_RATE << " seconds)" << std::endl;
@@ -201,48 +238,83 @@ std::vector<int16_t> generateTTSAudio(const std::string& text, const Config& con
     std::string cmd;
     
     if (config.engine == "piper") {
-        // Use piper - write to temp files to avoid popen buffering issues
-        char piperCmd[512];
+        // Use piper - use unique temp files to avoid race conditions
+        // Two-step: piper -> wav, then sox -> raw, then read directly
+        int pid = getpid();
+        char piperCmd[768];
         snprintf(piperCmd, sizeof(piperCmd),
-                 "echo \"%s\" | %s --model %s --output_raw 2>/dev/null | "
-                 "sox -t raw -r 22050 -b 16 -c 1 -e signed-integer - -r 8000 -b 16 -c 1 -t raw /tmp/piper_audio.raw && "
-                 "cat /tmp/piper_audio.raw",
+                 "echo \"%s\" | %s --model %s --output_file /tmp/piper_%d.wav >/dev/null 2>&1 && "
+                 "sox /tmp/piper_%d.wav -r 8000 -b 16 -c 1 -t raw /tmp/piper_%d.raw && "
+                 "sync",
                  text.c_str(),
                  config.piperPath.c_str(),
-                 config.piperModel.c_str());
-        cmd = piperCmd;
-    } else if (config.engine == "pico") {
-        // Use pico2wave
-        cmd = "pico2wave -l " + config.picoLanguage + " -w /tmp/tts_temp.wav \"" + text + "\" && "
-              "sox /tmp/tts_temp.wav -r 8000 -b 16 -c 1 -t raw -";
+                 config.piperModel.c_str(),
+                 pid, pid, pid);
+        
+        std::cout << "TTS command: " << piperCmd << std::endl;
+        
+        // Run the command to generate the files
+        int ret = system(piperCmd);
+        if (ret != 0) {
+            std::cerr << "Piper command failed" << std::endl;
+            return samples;
+        }
+        
+        // Read the raw file directly
+        char rawPath[64];
+        snprintf(rawPath, sizeof(rawPath), "/tmp/piper_%d.raw", pid);
+        
+        FILE* rawFile = fopen(rawPath, "rb");
+        if (!rawFile) {
+            std::cerr << "Failed to open " << rawPath << std::endl;
+            return samples;
+        }
+        
+        size_t beforeCount = samples.size();
+        int16_t sample;
+        while (fread(&sample, sizeof(int16_t), 1, rawFile) == 1) {
+            samples.push_back(sample);
+        }
+        
+        fclose(rawFile);
+        
+        std::cout << "Loaded piper audio: " << (samples.size() - beforeCount) << " TTS samples" << std::endl;
+        
     } else {
-        // Use espeak-ng (default)
-        char espeakCmd[512];
-        snprintf(espeakCmd, sizeof(espeakCmd),
-                 "espeak-ng -v %s -p %d -s %d -a %d \"%s\" --stdout | "
-                 "sox -t wav - -r 8000 -b 16 -c 1 -t raw -",
-                 config.espeakVoice.c_str(),
-                 config.espeakPitch,
-                 config.espeakSpeed,
-                 config.espeakAmplitude,
-                 text.c_str());
-        cmd = espeakCmd;
-    }
-    
-    std::cout << "TTS command: " << cmd << std::endl;
-    
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        std::cerr << "Failed to run TTS command" << std::endl;
-        return samples;
-    }
+        // pico or espeak - use popen approach
+        if (config.engine == "pico") {
+            // Use pico2wave
+            cmd = "pico2wave -l " + config.picoLanguage + " -w /tmp/tts_temp.wav \"" + text + "\" && "
+                  "sox /tmp/tts_temp.wav -r 8000 -b 16 -c 1 -t raw -";
+        } else {
+            // Use espeak-ng (default)
+            char espeakCmd[512];
+            snprintf(espeakCmd, sizeof(espeakCmd),
+                     "espeak-ng -v %s -p %d -s %d -a %d \"%s\" --stdout | "
+                     "sox -t wav - -r 8000 -b 16 -c 1 -t raw -",
+                     config.espeakVoice.c_str(),
+                     config.espeakPitch,
+                     config.espeakSpeed,
+                     config.espeakAmplitude,
+                     text.c_str());
+            cmd = espeakCmd;
+        }
+        
+        std::cout << "TTS command: " << cmd << std::endl;
+        
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            std::cerr << "Failed to run TTS command" << std::endl;
+            return samples;
+        }
 
-    int16_t sample;
-    while (fread(&sample, sizeof(int16_t), 1, pipe) == 1) {
-        samples.push_back(sample);
-    }
+        int16_t sample;
+        while (fread(&sample, sizeof(int16_t), 1, pipe) == 1) {
+            samples.push_back(sample);
+        }
 
-    pclose(pipe);
+        pclose(pipe);
+    }
     
     // Add trail silence
     int trailSamples = static_cast<int>(SAMPLE_RATE * config.trailSilence);
@@ -329,6 +401,8 @@ int main(int argc, char* argv[]) {
     // Load config
     config.load(configFile);
     
+    std::cout << "PID: " << getpid() << " (temp files: /tmp/*_" << getpid() << ".*)" << std::endl;
+    
     // Get announcement text
     std::string announcement = customText.empty() ? getTimeAnnouncement(config) : customText;
     std::cout << "Announcement: " << announcement << std::endl;
@@ -343,6 +417,23 @@ int main(int argc, char* argv[]) {
         std::cout << "Test mode - not sending to DVMBridge" << std::endl;
         std::cout << "Audio duration: " << (float)samples.size() / SAMPLE_RATE << " seconds" << std::endl;
         return 0;
+    }
+
+    // Save debug copy of what we're about to send
+    time_t now = time(nullptr);
+    char debugPath[128];
+    snprintf(debugPath, sizeof(debugPath), "/tmp/debug_send_%ld.raw", now);
+    FILE* debugFile = fopen(debugPath, "wb");
+    if (debugFile) {
+        fwrite(samples.data(), sizeof(int16_t), samples.size(), debugFile);
+        fclose(debugFile);
+        std::cout << "Debug: saved outgoing audio to " << debugPath << std::endl;
+    }
+
+    // Give system time to settle after TTS generation (especially for neural TTS like piper)
+    if (config.settleTime > 0) {
+        std::cout << "Waiting " << config.settleTime << " seconds for system to settle..." << std::endl;
+        usleep(static_cast<useconds_t>(config.settleTime * 1000000));
     }
 
     sendAudioToDVMBridge(samples, config.host, config.port);
