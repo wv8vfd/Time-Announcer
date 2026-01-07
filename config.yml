@@ -11,6 +11,8 @@ audio:
   leadSilence: 5.0
   # Seconds of silence after announcement
   trailSilence: 1.0
+  # Seconds to wait after TTS generation before sending (helps on slower systems)
+  settleTime: 2.0
 
 # Text-to-speech settings
 tts:
